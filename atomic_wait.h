@@ -1,15 +1,23 @@
+#ifndef __ATOMIC_WAIT_H__
+#define __ATOMIC_WAIT_H__
+
 #include <atomic>
 
 #include <pthread.h>
 #include <assert.h>
 #include <string.h>
 #include <errno.h>
+#include <stdio.h>
+
+#define ATOMICWAIT_ERROR(fmt, ...) fprintf(stderr, "%lu [%s:%d:%s] " fmt "\n", \
+        (unsigned long)pthread_self(), __FILE__, __LINE__, __FUNCTION__, ##__VA_ARGS__)
 
 namespace atomic_wait {
 
 struct alignas(64) AtomicWaitHelper {
     pthread_mutex_t mutex;
     pthread_cond_t condition;
+    std::atomic<size_t> refcount;
 };
 
 template<size_t Capacity, bool Shared = false>
@@ -51,6 +59,8 @@ struct AtomicWaitContext {
 
             retcode = pthread_cond_init(&helper->condition, &condattr);
             assert(retcode == 0);
+
+            helper->refcount.store(0, std::memory_order_relaxed);
         }
     }
 
@@ -90,6 +100,7 @@ struct AtomicWaitContext {
         }
 
         AtomicWaitHelper *helper = QueryHelper(object);
+        helper->refcount.fetch_add(1u, std::memory_order_relaxed);
         int retcode;
 
         retcode = pthread_mutex_lock(&helper->mutex);
@@ -121,6 +132,7 @@ struct AtomicWaitContext {
     template<typename T>
     void AtomicSignal(std::atomic<T> *object) {
         AtomicWaitHelper *helper = QueryHelper(object);
+        helper->refcount.fetch_add(1u, std::memory_order_relaxed);
         int retcode;
 
         retcode = pthread_mutex_lock(&helper->mutex);
@@ -140,7 +152,17 @@ struct AtomicWaitContext {
         retcode = pthread_mutex_unlock(&helper->mutex);
         assert(retcode == 0);
     }
+
+    void DumpRefcount() {
+        for(size_t i = 0; i < Capacity; ++i) {
+            ATOMICWAIT_ERROR("atomic_wait refcount, slot %lu: %lu", i,
+                    helpers[i].refcount.load(std::memory_order_relaxed));
+        }
+    }
 };
 
-
 }
+
+#undef ATOMICWAIT_ERROR
+
+#endif

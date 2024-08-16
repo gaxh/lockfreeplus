@@ -1,6 +1,8 @@
 #ifndef __MEMPOOL_ALLOCATE_H__
 #define __MEMPOOL_ALLOCATE_H__
 
+#include "versioned_index.h"
+
 #include <atomic>
 #include <type_traits>
 
@@ -18,72 +20,20 @@
 
 namespace mempool_allocate {
 
-struct Version {
-    size_t __value__;
-};
+using namespace versioned_index;
 
-struct Index {
-    size_t __value__;
-};
-
-struct alignas(sizeof(Version) + sizeof(Index)) VersionedIndex {
-    Version __version__;
-    Index __index__;
-};
-
-inline
-VersionedIndex MakeVersionedIndex(Index index, Version version) {
-    return (VersionedIndex) { version, index };
-}
-
-inline
-Index GetIndex(VersionedIndex &vindex) {
-    return vindex.__index__;
-}
-
-inline
-Version NextVersion(VersionedIndex &vindex) {
-    return (Version){ vindex.__version__.__value__ + 1u };
-}
-
-template<typename T>
-T *AccessByIndex(T* array, Index index) {
-    return &array[index.__value__];
-}
-
-template<typename T>
-T *AccessByIndex(T *array, size_t array_capacity, Index index) {
-    return index.__value__ < array_capacity ? &array[index.__value__] : nullptr;
-}
-
-template<typename T>
-Index GetArrayIndex(T *array, T *object) {
-    return (Index) { (size_t)(object - array) };
-}
-
-static constexpr Index null_index = { (size_t)-1 };
-
-static constexpr Version zero_version = { 0 };
-
-inline
-bool IsNullIndex(Index index) {
-    return index.__value__ == null_index.__value__;
-}
-
-inline
-bool IsSameIndex(Index x, Index y) {
-    return x.__value__ == y.__value__;
-}
-
-struct MemoryHeader {
-    std::atomic<VersionedIndex> stack_top;
-};
-
-template<typename ElementType, typename CustomHeader = int>
+template<typename ElementType, typename CustomHeader, typename VersionedIndexClass>
 class MempoolAllocate {
 public:
+    using VersionedIndex = typename VersionedIndexClass::VersionedIndex;
+    using Index = typename VersionedIndexClass::Index;
+    using Version = typename VersionedIndexClass::Version;
 
     bool Init(size_t capacity, void *memory, size_t memory_size) {
+        if(!m_vindex.Init(capacity)) {
+            return false;
+        }
+
         size_t required_alignment = QueryMinimalMemoryAlignment();
         if( (size_t)memory % required_alignment != 0 ) {
             MALLOCATE_ERROR("memory is not aligned well, memory=%p, required_alignment=%lu",
@@ -107,7 +57,8 @@ public:
     }
 
     void Setup() {
-        m_memory_layout->header.stack_top.store(MakeVersionedIndex(null_index, zero_version),
+        m_memory_layout->header.stack_top.store(m_vindex.MakeVersionedIndex(
+                    m_vindex.NullIndex(), m_vindex.ZeroVersion()),
                 std::memory_order_relaxed);
 
         for(size_t i = 0; i < m_capacity; ++i) {
@@ -131,7 +82,7 @@ public:
     }
 
     void Destroy() {
-        // nothing to free
+        m_vindex.Destroy();
     }
 
     ElementType *Acquire() {
@@ -181,11 +132,11 @@ public:
     Index QueryIndexOfPointer(ElementType *p) {
         ElementSlot *eslot = QueryElementSlot(p);
 
-        return GetArrayIndex<ElementSlot>(m_memory_layout->elem_slots, eslot);
+        return m_vindex.GetArrayIndex(m_memory_layout->elem_slots, eslot);
     }
 
     ElementType *QueryPointerByIndex(Index index) {
-        ElementSlot *eslot = AccessByIndex<ElementSlot>(m_memory_layout->elem_slots, m_capacity, index);
+        ElementSlot *eslot = m_vindex.AccessByIndex(m_memory_layout->elem_slots, m_capacity, index);
         return eslot ? QueryElementType(eslot) : nullptr;
     }
 
@@ -243,10 +194,10 @@ private:
             load(std::memory_order_acquire);
 
         for(;;) {
-            eslot->next_index = GetIndex(old_stack_top);
+            eslot->next_index = m_vindex.GetIndex(old_stack_top);
 
-            VersionedIndex new_stack_top = MakeVersionedIndex( GetArrayIndex<ElementSlot>(
-                        m_memory_layout->elem_slots, eslot), NextVersion(old_stack_top) );
+            VersionedIndex new_stack_top = m_vindex.MakeVersionedIndex( m_vindex.GetArrayIndex(
+                        m_memory_layout->elem_slots, eslot), m_vindex.NextVersion(old_stack_top) );
 
             if(m_memory_layout->header.stack_top.compare_exchange_strong(old_stack_top,
                         new_stack_top, std::memory_order_seq_cst, std::memory_order_acquire)) {
@@ -260,18 +211,18 @@ private:
             load(std::memory_order_acquire);
 
         for(;;) {
-            Index old_stack_top_index = GetIndex(old_stack_top);
+            Index old_stack_top_index = m_vindex.GetIndex(old_stack_top);
 
-            if(IsNullIndex(old_stack_top_index)) {
+            if(m_vindex.IsNullIndex(old_stack_top_index)) {
                 // stack is empty
                 return nullptr;
             }
 
-            ElementSlot *eslot = AccessByIndex<ElementSlot>(
+            ElementSlot *eslot = m_vindex.AccessByIndex(
                     m_memory_layout->elem_slots, old_stack_top_index);
 
-            VersionedIndex new_stack_top = MakeVersionedIndex( eslot->next_index,
-                    NextVersion(old_stack_top) );
+            VersionedIndex new_stack_top = m_vindex.MakeVersionedIndex( eslot->next_index,
+                    m_vindex.NextVersion(old_stack_top) );
 
             if(m_memory_layout->header.stack_top.compare_exchange_strong(old_stack_top,
                         new_stack_top, std::memory_order_seq_cst, std::memory_order_acquire)) {
@@ -286,6 +237,37 @@ private:
 
     ElementType *QueryElementType(ElementSlot *p) {
         return (ElementType *)p->buffer;
+    }
+
+public:
+
+    bool IsSameIndex(Index x, Index y) {
+        return m_vindex.IsSameIndex(x, y);
+    }
+
+    Index GetIndex(VersionedIndex vindex) {
+        return m_vindex.GetIndex(vindex);
+    }
+
+
+    VersionedIndex MakeVersionedIndex(Index index, Version version) {
+        return m_vindex.MakeVersionedIndex(index, version);
+    }
+
+    Index NullIndex() {
+        return m_vindex.NullIndex();
+    }
+
+    Version ZeroVersion() {
+        return m_vindex.ZeroVersion();
+    }
+
+    Version NextVersion(VersionedIndex vindex) {
+        return m_vindex.NextVersion(vindex);
+    }
+
+    bool IsNullIndex(Index index) {
+        return m_vindex.IsNullIndex(index);
     }
 
 private:
@@ -324,10 +306,12 @@ private:
 
     void *m_memory = nullptr;
     size_t m_memory_size = 0;
+
+    VersionedIndexClass m_vindex;
 };
 
 }
 
-#undef MALLOCATE_MEM_CHECK
+#undef MALLOCATE_ERROR
 
 #endif

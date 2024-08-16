@@ -6,32 +6,31 @@
 
 namespace local_queue {
 
-namespace MA = mempool_allocate;
-namespace AW = atomic_wait;
-
-template<typename ElementType> class LocalQueue {
+template<typename ElementType, typename VersionedIndexClass =
+    versioned_index::VersionedIndexCompressed>
+class LocalQueue {
 public:
     LocalQueue(size_t capacity) : m_capacity(capacity) {
         size_t allocate_capacity = capacity + 1u;
         assert(allocate_capacity > capacity);
 
-        size_t memory_size = m_allocate.QueryMinimalMemorySize(allocate_capacity);
-        m_local_memory = m_allocate.AllocateLocalMemory(allocate_capacity);
+        size_t memory_size = MA.QueryMinimalMemorySize(allocate_capacity);
+        m_local_memory = MA.AllocateLocalMemory(allocate_capacity);
         assert(m_local_memory);
 
-        bool init_ok = m_allocate.Init(allocate_capacity, m_local_memory, memory_size);
+        bool init_ok = MA.Init(allocate_capacity, m_local_memory, memory_size);
         assert(init_ok);
 
-        m_allocate.Setup();
+        MA.Setup();
 
-        m_allocate.ForeachElementUnsafe([](ElementLinkedNode *node) {
-                node->next.store(MA::MakeVersionedIndex(MA::null_index, MA::zero_version),
+        MA.ForeachElementUnsafe([this](ElementLinkedNode *node) {
+                node->next.store(MA.MakeVersionedIndex(MA.NullIndex(), MA.ZeroVersion()),
                         std::memory_order_relaxed);
                 node->lifetime.store(ElementLifetime::RECYCLE,
                         std::memory_order_relaxed);
                 });
 
-        m_custom_header = m_allocate.AccessCustomHeader();
+        m_custom_header = MA.AccessCustomHeader();
 
         m_custom_header->atomic_wait_ctx.Init();
 
@@ -39,15 +38,15 @@ public:
         m_write = &m_custom_header->write;
 
         // allocate one pointer as "empty pointer"
-        ElementLinkedNode *empty_node = m_allocate.Acquire();
+        ElementLinkedNode *empty_node = MA.Acquire();
         empty_node->lifetime.store(ElementLifetime::UNSET, std::memory_order_release);
 
-        MA::Index elem_index = m_allocate.QueryIndexOfPointer(empty_node);
+        Index elem_index = MA.QueryIndexOfPointer(empty_node);
 
-        m_read->store(MA::MakeVersionedIndex(
-                    elem_index, MA::zero_version), std::memory_order_relaxed);
-        m_write->store(MA::MakeVersionedIndex(
-                    elem_index, MA::zero_version), std::memory_order_seq_cst);
+        m_read->store(MA.MakeVersionedIndex(
+                    elem_index, MA.ZeroVersion()), std::memory_order_relaxed);
+        m_write->store(MA.MakeVersionedIndex(
+                    elem_index, MA.ZeroVersion()), std::memory_order_seq_cst);
     }
 
     ~LocalQueue() {
@@ -57,24 +56,25 @@ public:
 
         // recycle "empty pointer"
         {
-            MA::VersionedIndex read = m_read->load(std::memory_order_relaxed);
-            MA::VersionedIndex write = m_write->load(std::memory_order_relaxed);
+            VersionedIndex read = m_read->load(std::memory_order_relaxed);
+            VersionedIndex write = m_write->load(std::memory_order_relaxed);
 
-            assert(MA::IsSameIndex(MA::GetIndex(read), MA::GetIndex(write)));
+            assert(MA.IsSameIndex(MA.GetIndex(read), MA.GetIndex(write)));
 
-            ElementLinkedNode *empty_node = m_allocate.QueryPointerByIndex(MA::GetIndex(read));
-            m_allocate.Release(empty_node);
+            ElementLinkedNode *empty_node = MA.QueryPointerByIndex(MA.GetIndex(read));
+            MA.Release(empty_node);
         }
 
+        // m_custom_header->atomic_wait_ctx.DumpRefcount();
         m_custom_header->atomic_wait_ctx.Destroy();
 
-        m_allocate.Destroy();
-        m_allocate.FreeLocalMemory(m_local_memory);
+        MA.Destroy();
+        MA.FreeLocalMemory(m_local_memory);
     }
 
     template<typename Function>
     bool Push(Function f) {
-        ElementLinkedNode *elem_node = m_allocate.Acquire();
+        ElementLinkedNode *elem_node = MA.Acquire();
 
         if(!elem_node) {
             return false;
@@ -82,9 +82,9 @@ public:
 
         f((ElementType *)elem_node->buffer);
 
-        MA::VersionedIndex elem_node_next = elem_node->next.load(std::memory_order_relaxed);
-        elem_node->next.store(MakeVersionedIndex(MA::null_index,
-                    MA::NextVersion(elem_node_next)), std::memory_order_relaxed);
+        VersionedIndex elem_node_next = elem_node->next.load(std::memory_order_relaxed);
+        elem_node->next.store(MA.MakeVersionedIndex(MA.NullIndex(),
+                    MA.NextVersion(elem_node_next)), std::memory_order_relaxed);
 
         {
             ElementLifetime expected = ElementLifetime::RECYCLE;
@@ -93,31 +93,31 @@ public:
             assert(ok);
         }
 
-        MA::Index elem_node_index = m_allocate.QueryIndexOfPointer(elem_node);
-        MA::VersionedIndex old_write;
+        Index elem_node_index = MA.QueryIndexOfPointer(elem_node);
+        VersionedIndex old_write;
         ElementLinkedNode *old_write_node;
-        MA::VersionedIndex old_write_next;
+        VersionedIndex old_write_next;
 
         for(;;) {
             old_write = m_write->load(std::memory_order_relaxed);
-            old_write_node = m_allocate.QueryPointerByIndex(GetIndex(old_write));
+            old_write_node = MA.QueryPointerByIndex(MA.GetIndex(old_write));
             old_write_next = old_write_node->next.load(std::memory_order_relaxed);
 
-            if(MA::IsNullIndex( MA::GetIndex(old_write_next) )) {
+            if(MA.IsNullIndex( MA.GetIndex(old_write_next) )) {
                 if( old_write_node->next.compare_exchange_strong(old_write_next,
-                            MA::MakeVersionedIndex(elem_node_index, MA::NextVersion(old_write_next)),
+                            MA.MakeVersionedIndex(elem_node_index, MA.NextVersion(old_write_next)),
                             std::memory_order_seq_cst, std::memory_order_relaxed) ) {
                     // old_write_node->next has been linked to elem_node
-                    m_write->compare_exchange_strong(old_write, MA::MakeVersionedIndex(elem_node_index,
-                                MA::NextVersion(old_write)),
+                    m_write->compare_exchange_strong(old_write, MA.MakeVersionedIndex(elem_node_index,
+                                MA.NextVersion(old_write)),
                             std::memory_order_seq_cst, std::memory_order_relaxed);
                     break;
                 }
             } else {
                 // old_write->next is NOT nullptr
                 // change of m_write is NOT complete
-                m_write->compare_exchange_strong(old_write, MA::MakeVersionedIndex(
-                            MA::GetIndex(old_write_next), MA::NextVersion(old_write)),
+                m_write->compare_exchange_strong(old_write, MA.MakeVersionedIndex(
+                            MA.GetIndex(old_write_next), MA.NextVersion(old_write)),
                         std::memory_order_seq_cst, std::memory_order_relaxed);
             }
         }
@@ -128,22 +128,22 @@ public:
     template<typename Function>
     bool Pop(Function f) {
 
-        MA::VersionedIndex old_read;
-        MA::VersionedIndex old_read_next;
+        VersionedIndex old_read;
+        VersionedIndex old_read_next;
         ElementLinkedNode *old_read_node;
-        MA::VersionedIndex old_write;
+        VersionedIndex old_write;
 
         for(;;) {
             old_write = m_write->load(std::memory_order_acquire);
             old_read = m_read->load(std::memory_order_relaxed);
-            old_read_node = m_allocate.QueryPointerByIndex(MA::GetIndex(old_read));
+            old_read_node = MA.QueryPointerByIndex(MA.GetIndex(old_read));
             // load of old_read_next should happen after load of old_write
             old_read_next = old_read_node->next.load(std::memory_order_relaxed);
             
-            if(!MA::IsNullIndex( MA::GetIndex(old_read_next) )) {
-                if(!MA::IsSameIndex(MA::GetIndex(old_read), MA::GetIndex(old_write))) {
-                    if( m_read->compare_exchange_strong(old_read, MA::MakeVersionedIndex(
-                                    MA::GetIndex(old_read_next), MA::NextVersion(old_read)),
+            if(!MA.IsNullIndex( MA.GetIndex(old_read_next) )) {
+                if(!MA.IsSameIndex(MA.GetIndex(old_read), MA.GetIndex(old_write))) {
+                    if( m_read->compare_exchange_strong(old_read, MA.MakeVersionedIndex(
+                                    MA.GetIndex(old_read_next), MA.NextVersion(old_read)),
                                 std::memory_order_seq_cst, std::memory_order_relaxed) ) {
                         break;
                     }
@@ -151,8 +151,8 @@ public:
                     // other Push() NOT complete
                     // help move m_write
                     m_write->compare_exchange_strong(old_write,
-                            MA::MakeVersionedIndex( MA::GetIndex(old_read_next),
-                                MA::NextVersion(old_write)),
+                            MA.MakeVersionedIndex( MA.GetIndex(old_read_next),
+                                MA.NextVersion(old_write)),
                             std::memory_order_seq_cst, std::memory_order_relaxed);
                 }
             } else {
@@ -162,7 +162,7 @@ public:
         }
 
         {
-            ElementLinkedNode *old_read_next_node = m_allocate.QueryPointerByIndex(MA::GetIndex(old_read_next));
+            ElementLinkedNode *old_read_next_node = MA.QueryPointerByIndex(MA.GetIndex(old_read_next));
             ElementLifetime expected = ElementLifetime::SET;
 
             bool ok = old_read_next_node->lifetime.compare_exchange_strong(expected, ElementLifetime::READ,
@@ -191,7 +191,7 @@ public:
                         std::memory_order_acquire);
             }
 
-            m_allocate.Release(old_read_node);
+            MA.Release(old_read_node);
         }
 
         return true;
@@ -214,24 +214,27 @@ private:
         RECYCLE,
     };
 
+    using VersionedIndex = typename VersionedIndexClass::VersionedIndex;
+    using Index = typename VersionedIndexClass::Index;
+
     struct ElementLinkedNode {
         alignas(alignof(ElementType)) char buffer[sizeof(ElementType)];
-        std::atomic<MA::VersionedIndex> next;
+        std::atomic<VersionedIndex> next;
         std::atomic<ElementLifetime> lifetime;
     };
 
     struct CustomMemoryHeader {
-        alignas(64) std::atomic<MA::VersionedIndex> read;
-        alignas(64) std::atomic<MA::VersionedIndex> write;
+        alignas(64) std::atomic<VersionedIndex> read;
+        alignas(64) std::atomic<VersionedIndex> write;
 
-        AW::AtomicWaitContext<256, false> atomic_wait_ctx;
+        atomic_wait::AtomicWaitContext<256, false> atomic_wait_ctx;
     };
 
-    MA::MempoolAllocate<ElementLinkedNode, CustomMemoryHeader> m_allocate;
+    mempool_allocate::MempoolAllocate<ElementLinkedNode, CustomMemoryHeader, VersionedIndexClass> MA;
     void *m_local_memory = nullptr;
     CustomMemoryHeader *m_custom_header = nullptr;
-    std::atomic<MA::VersionedIndex> *m_read = nullptr;
-    std::atomic<MA::VersionedIndex> *m_write = nullptr;
+    std::atomic<VersionedIndex> *m_read = nullptr;
+    std::atomic<VersionedIndex> *m_write = nullptr;
     size_t m_capacity;
 };
 
