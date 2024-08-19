@@ -5,9 +5,9 @@
 
 #include <pthread.h>
 #include <assert.h>
-#include <string.h>
 #include <errno.h>
 #include <stdio.h>
+#include <string.h>
 
 #define ATOMICWAIT_ERROR(fmt, ...) fprintf(stderr, "%lu [%s:%d:%s] " fmt "\n", \
         (unsigned long)pthread_self(), __FILE__, __LINE__, __FUNCTION__, ##__VA_ARGS__)

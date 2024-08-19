@@ -4,14 +4,11 @@
 #include "versioned_index.h"
 
 #include <atomic>
-#include <type_traits>
 
 #include <stddef.h>
 #include <assert.h>
 #include <stdio.h>
 #include <pthread.h>
-#include <stdlib.h>
-#include <string.h>
 
 #define MALLOCATE_ERROR(fmt, ...) fprintf(stderr, "%lu [%s:%d:%s] " fmt "\n", \
         (unsigned long)pthread_self(), __FILE__, __LINE__, __FUNCTION__, ##__VA_ARGS__)
@@ -148,39 +145,6 @@ public:
         return sizeof(MemoryLayout) + capacity * sizeof(ElementSlot);
     }
 
-    void *AllocateLocalMemory(size_t capacity) const {
-        size_t real_allocate_size = QueryMinimalMemorySize(capacity);
-        size_t alignment = QueryMinimalMemoryAlignment();
-        real_allocate_size += alignment;
-        real_allocate_size += sizeof(unsigned int); // record "real offset" to "real pointer"
-
-        void *real_pointer = malloc(real_allocate_size);
-
-        if(!real_pointer) {
-            MALLOCATE_ERROR("call malloc() failed, size=%lu", real_allocate_size);
-            return nullptr;
-        }
-
-        UINTPTR aligned_pointer = (UINTPTR)real_pointer + sizeof(unsigned int);
-        aligned_pointer = (aligned_pointer - 1u) / alignment * alignment + alignment;
-
-        unsigned int real_offset = aligned_pointer - (UINTPTR)real_pointer;
-        assert(real_offset + (UINTPTR)real_pointer == aligned_pointer);
-
-        memcpy( (void *)(aligned_pointer - sizeof(unsigned int)), &real_offset, sizeof(real_offset) );
-        return (void *)aligned_pointer;
-    }
-
-    void FreeLocalMemory(void *p) const {
-        UINTPTR aligned_pointer = (UINTPTR)p;
-        unsigned int real_offset;
-
-        memcpy( &real_offset, (void *)(aligned_pointer - sizeof(unsigned int)), sizeof(real_offset) );
-
-        void *real_pointer = (void *)(aligned_pointer - real_offset);
-        free(real_pointer);
-    }
-
     CustomHeader *AccessCustomHeader() {
         return &m_memory_layout->custom_header;
     }
@@ -282,11 +246,12 @@ private:
 #endif
 
     struct ElementSlot {
+        alignas(alignof(ElementType)) char buffer[sizeof(ElementType)];
+        Index next_index;
 #ifdef MALLOCATE_MEM_CHECK
         std::atomic<ElementSlotDogtag> dogtag;
 #endif
-        alignas(alignof(ElementType)) char buffer[sizeof(ElementType)];
-        Index next_index;
+
     };
 
     struct MemoryHeader {
@@ -294,8 +259,8 @@ private:
     };
 
     struct MemoryLayout {
-        MemoryHeader header;
         CustomHeader custom_header;
+        MemoryHeader header;
         ElementSlot elem_slots[0];
     };
 

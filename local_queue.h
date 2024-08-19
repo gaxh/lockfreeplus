@@ -3,6 +3,7 @@
 
 #include "atomic_wait.h"
 #include "mempool_allocate.h"
+#include "memory_helper.h"
 
 namespace local_queue {
 
@@ -15,7 +16,8 @@ public:
         assert(allocate_capacity > capacity);
 
         size_t memory_size = MA.QueryMinimalMemorySize(allocate_capacity);
-        m_local_memory = MA.AllocateLocalMemory(allocate_capacity);
+        size_t alignment = MA.QueryMinimalMemoryAlignment();
+        m_local_memory = memory_helper::AllocateLocalMemory(memory_size, alignment);
         assert(m_local_memory);
 
         bool init_ok = MA.Init(allocate_capacity, m_local_memory, memory_size);
@@ -69,7 +71,7 @@ public:
         m_custom_header->atomic_wait_ctx.Destroy();
 
         MA.Destroy();
-        MA.FreeLocalMemory(m_local_memory);
+        memory_helper::FreeLocalMemory(m_local_memory);
     }
 
     template<typename Function>
