@@ -190,7 +190,7 @@ private:
         CustomMemoryHeader *header = MA.AccessCustomHeader();
 
         if(header->initialized) {
-            // validate
+            // validate and reuse initialized queue
             if(m_shm_name.compare(header->shm_name) != 0) {
                 SQUEUE_ERROR("validate shm name failed. name=%s, expected=%s",
                         header->shm_name, m_shm_name.c_str());
@@ -209,45 +209,43 @@ private:
             m_read = &m_custom_header->read;
             m_write = &m_custom_header->write;
 
-            SQUEUE_ERROR("use initialized queue");
             return true;
-        } 
-        
-        // initialize
-        MA.Setup();
+        } else {
+            // initialize queue
+            MA.Setup();
 
-        MA.ForeachElementUnsafe([this](ElementLinkedNode *node) {
-                node->next.store(MA.MakeVersionedIndex(MA.NullIndex(), MA.ZeroVersion()),
-                        std::memory_order_relaxed);
-                node->lifetime.store(ElementLifetime::RECYCLE,
-                        std::memory_order_relaxed);
-                });
+            MA.ForeachElementUnsafe([this](ElementLinkedNode *node) {
+                    node->next.store(MA.MakeVersionedIndex(MA.NullIndex(), MA.ZeroVersion()),
+                            std::memory_order_relaxed);
+                    node->lifetime.store(ElementLifetime::RECYCLE,
+                            std::memory_order_relaxed);
+                    });
 
-        m_shared_memory = p;
-        m_shared_memory_size = memory_size;
-        m_custom_header = header;
+            m_shared_memory = p;
+            m_shared_memory_size = memory_size;
+            m_custom_header = header;
 
-        m_custom_header->atomic_wait_ctx.Init();
+            m_custom_header->atomic_wait_ctx.Init();
 
-        m_read = &m_custom_header->read;
-        m_write = &m_custom_header->write;
+            m_read = &m_custom_header->read;
+            m_write = &m_custom_header->write;
 
-        // allocate one pointer as "empty pointer"
-        ElementLinkedNode *empty_node = MA.Acquire();
-        empty_node->lifetime.store(ElementLifetime::UNSET, std::memory_order_release);
+            // allocate one pointer as "empty pointer"
+            ElementLinkedNode *empty_node = MA.Acquire();
+            empty_node->lifetime.store(ElementLifetime::UNSET, std::memory_order_release);
 
-        Index elem_index = MA.QueryIndexOfPointer(empty_node);
+            Index elem_index = MA.QueryIndexOfPointer(empty_node);
 
-        m_read->store(MA.MakeVersionedIndex(
-                    elem_index, MA.ZeroVersion()), std::memory_order_relaxed);
-        m_write->store(MA.MakeVersionedIndex(
-                    elem_index, MA.ZeroVersion()), std::memory_order_seq_cst);
+            m_read->store(MA.MakeVersionedIndex(
+                        elem_index, MA.ZeroVersion()), std::memory_order_relaxed);
+            m_write->store(MA.MakeVersionedIndex(
+                        elem_index, MA.ZeroVersion()), std::memory_order_seq_cst);
 
-        header->shm_size = memory_size;
-        snprintf(header->shm_name, sizeof(header->shm_name), "%s", m_shm_name.c_str());
-        header->initialized = 1;
+            header->shm_size = memory_size;
+            snprintf(header->shm_name, sizeof(header->shm_name), "%s", m_shm_name.c_str());
+            header->initialized = 1;
+        }
 
-        SQUEUE_ERROR("initialize queue");
         return true;
     }
 
